@@ -1,98 +1,117 @@
 import { Metadata } from "next"
 import { notFound } from "next/navigation"
+import { getRegion } from "@lib/data/region"
+import { getProduct } from "@lib/data/product"
 import { listProducts } from "@lib/data/products"
-import { getRegion, listRegions } from "@lib/data/regions"
-import ProductTemplate from "@modules/products/templates"
+import { HttpTypes } from "@medusajs/types"
+import ProductDetail from "@modules/products/templates/product-detail"
+import { getProductByHandle } from "@lib/data/product"
+import { Logger } from "@lib/util/logger"
 
 type Props = {
-  params: Promise<{ countryCode: string; handle: string }>
+  params: {
+    countryCode: string
+    handle: string
+  }
 }
 
+/**
+ * Generate static parameters for all product handles
+ * This improves performance by pre-rendering product pages at build time
+ */
 export async function generateStaticParams() {
   try {
-    const countryCodes = await listRegions().then((regions) =>
-      regions?.map((r) => r.countries?.map((c) => c.iso_2)).flat()
-    )
-
-    if (!countryCodes) {
+    const { response } = await listProducts({})
+    
+    if (!response || !response.products) {
+      Logger.error("Failed to fetch products for static generation")
       return []
     }
 
-    const products = await listProducts({
-      countryCode: "US",
-      queryParams: { fields: "handle" },
-    }).then(({ response }) => response.products)
-
-    return countryCodes
-      .map((countryCode) =>
-        products.map((product) => ({
-          countryCode,
-          handle: product.handle,
-        }))
-      )
-      .flat()
-      .filter((param) => param.handle)
+    return response.products.map((product) => ({
+      handle: product.handle,
+    }))
   } catch (error) {
-    console.error(
-      `Failed to generate static paths for product pages: ${
-        error instanceof Error ? error.message : "Unknown error"
-      }.`
-    )
+    Logger.error(`Error generating static params for products: ${error}`)
     return []
   }
 }
 
-export async function generateMetadata(props: Props): Promise<Metadata> {
-  const params = await props.params
+/**
+ * Generate metadata for SEO optimization
+ * This creates dynamic titles, descriptions, and Open Graph data for each product
+ */
+export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const { handle } = params
-  const region = await getRegion(params.countryCode)
-
-  if (!region) {
-    notFound()
-  }
-
-  const product = await listProducts({
-    countryCode: params.countryCode,
-    queryParams: { handle },
-  }).then(({ response }) => response.products[0])
-
-  if (!product) {
-    notFound()
-  }
-
-  return {
-    title: `${product.title} | Medusa Store`,
-    description: `${product.title}`,
-    openGraph: {
-      title: `${product.title} | Medusa Store`,
-      description: `${product.title}`,
-      images: product.thumbnail ? [product.thumbnail] : [],
-    },
+  
+  try {
+    const product = await getProductByHandle(handle)
+    
+    if (!product) {
+      return {
+        title: "Product Not Found",
+        description: "The product you are looking for could not be found.",
+        robots: "noindex, nofollow",
+      }
+    }
+    
+    // Create a clean description by removing HTML tags and limiting length
+    const cleanDescription = product.description
+      ? product.description.replace(/<\/?[^>]+(>|$)/g, "").substring(0, 160)
+      : "Explore our product collection"
+    
+    return {
+      title: `${product.title} | Racheal's Store`,
+      description: cleanDescription,
+      openGraph: {
+        title: product.title,
+        description: cleanDescription,
+        images: product.thumbnail 
+          ? [{ url: product.thumbnail, alt: product.title }] 
+          : [],
+        type: "product",
+      },
+      twitter: {
+        card: "summary_large_image",
+        title: product.title,
+        description: cleanDescription,
+        images: product.thumbnail ? [product.thumbnail] : [],
+      },
+    }
+  } catch (error) {
+    Logger.error(`Error generating metadata for product ${handle}: ${error}`)
+    return {
+      title: "Product | Racheal's Store",
+      description: "Explore our product collection",
+    }
   }
 }
 
-export default async function ProductPage(props: Props) {
-  const params = await props.params
-  const region = await getRegion(params.countryCode)
-
-  if (!region) {
+export default async function ProductPage({ params }: Props) {
+  const { countryCode, handle } = params
+  
+  try {
+    // Get region from country code
+    const region = await getRegion(countryCode)
+    
+    if (!region) {
+      Logger.error(`Region not found for country code: ${countryCode}`)
+      notFound()
+    }
+    
+    // Get product by handle
+    const product = await getProductByHandle(handle)
+    
+    if (!product) {
+      Logger.error(`Product not found with handle: ${handle}`)
+      notFound()
+    }
+    
+    return (
+      <ProductDetail product={product} region={region} />
+    )
+  } catch (error) {
+    Logger.error(`Error rendering product page for ${handle}: ${error}`)
     notFound()
   }
-
-  const pricedProduct = await listProducts({
-    countryCode: params.countryCode,
-    queryParams: { handle: params.handle },
-  }).then(({ response }) => response.products[0])
-
-  if (!pricedProduct) {
-    notFound()
-  }
-
-  return (
-    <ProductTemplate
-      product={pricedProduct}
-      region={region}
-      countryCode={params.countryCode}
-    />
-  )
 }
